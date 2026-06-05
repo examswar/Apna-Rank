@@ -268,7 +268,7 @@ export function startDiagnosisWorker(): Worker {
       const { attemptId, studentId } = job.data as { attemptId: string; studentId: string };
       await runDiagnosis(attemptId, studentId);
     },
-    { connection: redis },
+    { connection: redis as any },
   );
 
   worker.on('error', (err) => {

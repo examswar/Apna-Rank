@@ -5,6 +5,7 @@ import { config } from '../../lib/config';
 import { NotFoundError, ConflictError, ForbiddenError, DpaRequiredError } from '../../lib/errors';
 
 const BATCH_INVITE_TTL = 7 * 24 * 3600; // 7 days
+const devInviteCache = new Map<string, string>(); // token → batchId (dev-only fallback)
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
@@ -130,7 +131,16 @@ export async function generateBatchInvite(batchId: string, userId: string) {
   const token     = randomBytes(20).toString('hex');
   const expiresAt = new Date(Date.now() + BATCH_INVITE_TTL * 1000);
 
-  await redis.set(KEYS.batchInvite(token), batchId, 'EX', BATCH_INVITE_TTL);
+  // Redis may be unavailable in dev — store invite token; if Redis is down,
+  // log the token so manual testing is still possible.
+  try {
+    await redis.set(KEYS.batchInvite(token), batchId, 'EX', BATCH_INVITE_TTL);
+  } catch {
+    console.warn(`[invite] Redis unavailable — token ${token} stored in-memory only (dev)`);
+    if (config.isDev) {
+      devInviteCache.set(token, batchId);
+    }
+  }
 
   return {
     inviteUrl: `${config.appBaseUrl}/batches/join/${token}`,

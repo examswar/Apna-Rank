@@ -38,6 +38,18 @@ async function main() {
     trustProxy: true,
   });
 
+  // Allow empty JSON bodies on endpoints that don't require a body (e.g. POST /publish).
+  // Fastify v5 rejects Content-Type: application/json with no body by default.
+  // The webhook plugin overrides this with its own scoped Buffer parser.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    try {
+      done(null, (body as string).length > 0 ? JSON.parse(body as string) : {});
+    } catch (err) {
+      (err as any).statusCode = 400;
+      done(err as Error);
+    }
+  });
+
   // ── Plugins ────────────────────────────────────────────────
   await app.register(fastifyCors, {
     origin: config.allowedOrigins,
@@ -86,7 +98,7 @@ async function main() {
   await app.register(fastifySwaggerUi, { routePrefix: '/docs' });
 
   // ── Global error handler ───────────────────────────────────
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((err: unknown, _req, reply) => {
     if (err instanceof AppError) {
       return reply.status(err.statusCode).send(fail(err.code, err.message));
     }
@@ -94,7 +106,7 @@ async function main() {
       const msg = err.errors[0]?.message ?? 'Validation failed';
       return reply.status(422).send(fail('VALIDATION_ERROR', msg));
     }
-    if (err.validation) {
+    if (err instanceof Error && (err as any).validation) {
       return reply.status(422).send(fail('VALIDATION_ERROR', err.message));
     }
     app.log.error(err);

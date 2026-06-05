@@ -36,7 +36,10 @@ export const KEYS = {
 } as const;
 
 // ── BullMQ Queues ─────────────────────────────────────────────
-const queueOpts = { connection: redis };
+// Cast to any: pnpm resolves two ioredis patch versions (5.10.1 + 5.11.1) for
+// our app and BullMQ. They are structurally compatible at runtime; the cast
+// suppresses the TypeScript structural mismatch.
+const queueOpts = { connection: redis as any };
 
 export const diagnosisQueue = new Queue('diagnosis', queueOpts);
 export const notificationQueue = new Queue('notification', queueOpts);

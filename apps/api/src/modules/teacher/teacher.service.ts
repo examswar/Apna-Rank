@@ -7,17 +7,23 @@ export async function register(
   userId: string,
   data: { panNumber: string; examCategories: string[] },
 ) {
-  const existing = await prisma.teacher.findUnique({ where: { userId } });
-  if (existing) throw new ConflictError('Teacher profile already exists');
-
+  // select-role('teacher') creates a skeleton Teacher row with no PAN/categories.
+  // This endpoint fills it in. Use upsert so both flows work.
   await prisma.user.update({ where: { id: userId }, data: { role: 'teacher' } });
 
-  return prisma.teacher.create({
-    data: {
+  return prisma.teacher.upsert({
+    where:  { userId },
+    create: {
       userId,
       panNumber:      encryptField(data.panNumber),
       examCategories: data.examCategories as any,
       status:         'pending',
+    },
+    update: {
+      panNumber:      encryptField(data.panNumber),
+      examCategories: data.examCategories as any,
+      status:         'pending',
+      panVerified:    false,
     },
     select: { id: true, status: true, examCategories: true, panVerified: true, verifiedAt: true },
   });

@@ -17,7 +17,7 @@ export const irtWorker = new Worker(
     // TODO: update question.irt_difficulty
     console.log(`[irt] Recalibrating question=${questionId}`);
   },
-  { connection: redis },
+  { connection: redis as any },
 );
 
 irtWorker.on('failed', (job, err) => {

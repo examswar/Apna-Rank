@@ -14,7 +14,7 @@ export function startBattleWorker(): Worker {
       console.log(`[battle] Timer expired for battle=${battleId}`);
       await resolveBattle(battleId);
     },
-    { connection: redis },
+    { connection: redis as any },
   );
 
   worker.on('error', (err) => {

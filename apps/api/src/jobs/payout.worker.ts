@@ -33,7 +33,7 @@ export const payoutWorker = new Worker(
     // TODO: queue for monthly Razorpay payout batch
     console.log(`[payout] Earned ₹${teacherAmount} for teacher=${teacherId}`);
   },
-  { connection: redis },
+  { connection: redis as any },
 );
 
 payoutWorker.on('failed', (job, err) => {

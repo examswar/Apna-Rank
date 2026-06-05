@@ -24,7 +24,7 @@ export const notificationWorker = new Worker(
     // TODO: dispatch push via FCM
     console.log(`[notification] Sent type=${type} to user=${userId}`);
   },
-  { connection: redis },
+  { connection: redis as any },
 );
 
 notificationWorker.on('failed', (job, err) => {
