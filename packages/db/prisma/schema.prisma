@@ -1,0 +1,736 @@
+// Apna Rank — Prisma Schema v1.0
+// Paired with: Backend Schema Docs v1.0 + TRD v1.0
+//
+// Partial indexes (WHERE clause) are not supported in Prisma schema syntax.
+// Add them via raw SQL in migration files after `prisma migrate dev` generates
+// the migration. See comments throughout this file marking which indexes
+// need the SQL treatment.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  student
+  teacher
+  institute_admin
+  platform_admin
+}
+
+enum Language {
+  hi
+  en
+}
+
+// All 18 exam categories — MVP tests with SSC_CGL only,
+// but schema supports everything from day 1.
+enum ExamCategory {
+  SSC_CGL
+  SSC_CHSL
+  SSC_MTS
+  SSC_GD
+  SSC_CPO
+  RAILWAY_NTPC
+  RAILWAY_GROUP_D
+  RAILWAY_ALP
+  RAILWAY_JE
+  UPSC_CSE
+  UPSC_CDS
+  UPSC_NDA
+  NEET_UG
+  NEET_PG
+  JEE_MAIN
+  JEE_ADVANCED
+  BOARDS_10TH
+  BOARDS_12TH
+}
+
+enum DifficultyTag {
+  easy
+  medium
+  hard
+}
+
+enum MistakeType {
+  concept
+  calc_slip
+  misread
+  time
+  guess
+}
+
+enum TestType {
+  marketplace
+  institute
+  live
+  battle
+  baseline
+}
+
+enum AttemptStatus {
+  in_progress
+  submitted
+  abandoned
+}
+
+enum ConfidenceTag {
+  sure
+  unsure
+  guess
+}
+
+enum BattleStatus {
+  waiting
+  active
+  completed
+  abandoned
+}
+
+enum TeacherStatus {
+  pending
+  verified
+  suspended
+}
+
+enum PurchaseStatus {
+  pending
+  paid
+  refunded
+}
+
+enum EarningsStatus {
+  pending
+  paid
+}
+
+enum InstituteType {
+  coaching
+  school
+  college
+}
+
+enum LiveTestStatus {
+  scheduled
+  lobby_open
+  active
+  completed
+  cancelled
+}
+
+// ============================================================
+// AUTHENTICATION CLUSTER
+// users ─── refresh_tokens
+//        └─ otp_requests
+//        └─ parental_consents
+// ============================================================
+
+model User {
+  id                String    @id @default(uuid()) @db.Uuid
+  phone             String    @unique @db.VarChar(15)
+  email             String?   @unique @db.VarChar(255)
+  name              String    @db.VarChar(255)
+  role              Role      @default(student)
+  languagePref      Language  @default(hi) @map("language_pref")
+  isMinor           Boolean   @default(false) @map("is_minor")
+  dob               DateTime? @db.Date
+  // Parental consent fields — immutable once set (enforced at app layer + DB trigger)
+  consentGiven      Boolean   @default(false) @map("consent_given")
+  consentAt         DateTime? @map("consent_at") @db.Timestamptz
+  consentGuardianId String?   @map("consent_guardian_id") @db.VarChar(255)
+  isActive          Boolean   @default(true) @map("is_active")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  refreshTokens          RefreshToken[]
+  parentalConsents       ParentalConsent[]
+  studentProfile         StudentProfile?
+  teacher                Teacher?
+  instituteContact       Institute?              @relation("InstituteContact")
+  createdQuestions       Question[]              @relation("QuestionCreator")
+  createdTests           Test[]                  @relation("TestCreator")
+  testPurchases          TestPurchase[]
+  attempts               Attempt[]
+  mistakeClassifications MistakeClassification[]
+  diagnosisResults       DiagnosisResult[]
+  galtiNotebook          GaltiNotebookEntry[]
+  battlesAsPlayer1       Battle[]                @relation("BattlePlayer1")
+  battlesAsPlayer2       Battle[]                @relation("BattlePlayer2")
+  battleWins             Battle[]                @relation("BattleWinner")
+  liveTestRegistrations  LiveTestRegistration[]
+  notifications          Notification[]
+  contentReports         ContentReport[]
+
+  // Partial index hint:
+  // CREATE INDEX idx_users_active_role ON users (role, is_active) WHERE is_active = true;
+  @@index([phone])
+  @@index([role, isActive])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @map("token_hash") @db.VarChar(255)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+model OtpRequest {
+  id        String   @id @default(uuid()) @db.Uuid
+  phone     String   @db.VarChar(15)
+  otpHash   String   @map("otp_hash") @db.VarChar(255)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  verified  Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([phone, createdAt])
+  @@map("otp_requests")
+}
+
+// DPDP: Minor self-registration requires verifiable parental consent.
+// This table is the immutable audit trail. Never delete rows.
+model ParentalConsent {
+  id                   String    @id @default(uuid()) @db.Uuid
+  userId               String    @map("user_id") @db.Uuid
+  guardianPhone        String    @map("guardian_phone") @db.VarChar(255) // encrypted AES-256-GCM
+  guardianDigiLockerId String?   @map("guardian_digi_locker_id") @db.VarChar(255)
+  approvedAt           DateTime? @map("approved_at") @db.Timestamptz // immutable once set — legal evidence
+  rejectedAt           DateTime? @map("rejected_at") @db.Timestamptz
+  expiresAt            DateTime  @map("expires_at") @db.Timestamptz // 48h DPDP window
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("parental_consents")
+}
+
+// ============================================================
+// STUDENT CLUSTER
+// users → student_profiles → attempts → attempt_answers
+//                          ├─ diagnosis_results
+//                          ├─ galti_notebook_entries
+//                          └─ batch_students
+// ============================================================
+
+model StudentProfile {
+  id            String       @id @default(uuid()) @db.Uuid
+  userId        String       @unique @map("user_id") @db.Uuid
+  examCategory  ExamCategory @map("exam_category")
+  examSubType   String?      @map("exam_sub_type") @db.VarChar(100)
+  targetYear    Int?         @map("target_year")
+  examDate      DateTime?    @map("exam_date") @db.Date
+  baselineLevel Decimal?     @map("baseline_level") @db.Decimal(5, 2) // IRT percentile 0.00–100.00
+  currentStreak Int          @default(0) @map("current_streak")
+  maxStreak     Int          @default(0) @map("max_streak")
+  lastActiveAt  DateTime?    @map("last_active_at") @db.Timestamptz
+  instituteId   String?      @map("institute_id") @db.Uuid
+  // DPDP firewall flag — all queries joining public pools MUST filter this out
+  isMinorData   Boolean      @default(false) @map("is_minor_data")
+
+  user      User           @relation(fields: [userId], references: [id])
+  institute Institute?     @relation(fields: [instituteId], references: [id])
+  batches   BatchStudent[]
+
+  @@index([examCategory])
+  @@index([instituteId])
+  @@index([lastActiveAt])
+  @@map("student_profiles")
+}
+
+// ============================================================
+// QUESTION & TEST CLUSTER
+// questions → test_questions → tests → test_purchases
+//                            ├─ attempts
+//                            ├─ live_tests
+//                            └─ battles
+// ============================================================
+
+model Question {
+  id            String        @id @default(uuid()) @db.Uuid
+  examCategory  ExamCategory  @map("exam_category")
+  subject       String?       @db.VarChar(100)
+  topic         String?       @db.VarChar(200)
+  subTopic      String?       @map("sub_topic") @db.VarChar(200)
+  language      Language      @default(hi)
+  questionText  String        @map("question_text")
+  options       Json          // [{key:'A',text:'...'},{key:'B',text:'...'},...]
+  correctOption String        @map("correct_option") @db.VarChar(1)
+  explanation   String?
+  difficultyTag DifficultyTag @map("difficulty_tag")
+  // IRT-calibrated difficulty — null until question has ≥1000 attempts
+  irtDifficulty Decimal?      @map("irt_difficulty") @db.Decimal(5, 3)
+  attemptCount  Int           @default(0) @map("attempt_count")
+  createdBy     String        @map("created_by") @db.Uuid
+  isActive      Boolean       @default(true) @map("is_active")
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  creator                User                        @relation("QuestionCreator", fields: [createdBy], references: [id])
+  testQuestions          TestQuestion[]
+  attemptAnswers         AttemptAnswer[]
+  mistakeClassifications MistakeClassification[]
+  galtiEntries           GaltiNotebookEntry[]
+
+  // Partial index for IRT selection — add via SQL migration:
+  // CREATE INDEX idx_questions_irt ON questions (exam_category, irt_difficulty)
+  //   WHERE is_active = true AND irt_difficulty IS NOT NULL;
+  // CREATE INDEX idx_questions_manual ON questions (exam_category, difficulty_tag, subject)
+  //   WHERE is_active = true;
+  @@index([examCategory, difficultyTag, subject])
+  @@index([examCategory, irtDifficulty])
+  @@index([createdBy])
+  @@map("questions")
+}
+
+model Test {
+  id              String       @id @default(uuid()) @db.Uuid
+  title           String       @db.VarChar(255)
+  examCategory    ExamCategory @map("exam_category")
+  createdBy       String       @map("created_by") @db.Uuid
+  type            TestType
+  price           Decimal      @default(0) @db.Decimal(10, 2)
+  durationSecs    Int          @map("duration_secs")
+  negativeMarking Decimal      @default(0) @map("negative_marking") @db.Decimal(4, 3) // 0.25 | 0.33 | 1.0 | 0=off
+  totalMarks      Int          @map("total_marks")
+  isPublished     Boolean      @default(false) @map("is_published")
+  scheduledAt     DateTime?    @map("scheduled_at") @db.Timestamptz
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz
+
+  creator          User                  @relation("TestCreator", fields: [createdBy], references: [id])
+  testQuestions    TestQuestion[]
+  testPurchases    TestPurchase[]
+  attempts         Attempt[]
+  battles          Battle[]
+  batchAssignments BatchTestAssignment[]
+  liveTest         LiveTest?
+
+  @@index([examCategory, type, isPublished])
+  @@index([createdBy])
+  @@map("tests")
+}
+
+model TestQuestion {
+  id         String  @id @default(uuid()) @db.Uuid
+  testId     String  @map("test_id") @db.Uuid
+  questionId String  @map("question_id") @db.Uuid
+  orderIndex Int     @map("order_index")
+  marks      Decimal @default(1.0) @db.Decimal(4, 2)
+
+  test     Test     @relation(fields: [testId], references: [id])
+  question Question @relation(fields: [questionId], references: [id])
+
+  @@unique([testId, questionId])
+  @@index([testId])
+  @@map("test_questions")
+}
+
+model TestPurchase {
+  id                String         @id @default(uuid()) @db.Uuid
+  testId            String         @map("test_id") @db.Uuid
+  studentId         String         @map("student_id") @db.Uuid
+  amountPaid        Decimal        @map("amount_paid") @db.Decimal(10, 2)
+  // Immutable once set — financial records
+  razorpayOrderId   String?        @map("razorpay_order_id") @db.VarChar(255)
+  razorpayPaymentId String?        @map("razorpay_payment_id") @db.VarChar(255)
+  status            PurchaseStatus @default(pending)
+  purchasedAt       DateTime       @default(now()) @map("purchased_at") @db.Timestamptz
+
+  test           Test            @relation(fields: [testId], references: [id])
+  student        User            @relation(fields: [studentId], references: [id])
+  teacherEarning TeacherEarning?
+
+  @@unique([testId, studentId])
+  @@index([studentId])
+  @@map("test_purchases")
+}
+
+// ============================================================
+// ATTEMPT & DIAGNOSIS CLUSTER
+// ============================================================
+
+model Attempt {
+  id            String        @id @default(uuid()) @db.Uuid
+  testId        String        @map("test_id") @db.Uuid // immutable
+  studentId     String        @map("student_id") @db.Uuid // immutable
+  startedAt     DateTime      @map("started_at") @db.Timestamptz
+  submittedAt   DateTime?     @map("submitted_at") @db.Timestamptz
+  score         Decimal?      @db.Decimal(8, 2)
+  totalMarks    Decimal?      @map("total_marks") @db.Decimal(8, 2)
+  timeTakenSecs Int?          @map("time_taken_secs")
+  status        AttemptStatus @default(in_progress)
+  // DPDP firewall — all cross-user analytics MUST exclude is_minor_data = true
+  isMinorData   Boolean       @default(false) @map("is_minor_data")
+
+  test            Test             @relation(fields: [testId], references: [id])
+  student         User             @relation(fields: [studentId], references: [id])
+  answers         AttemptAnswer[]
+  diagnosisResult DiagnosisResult?
+
+  // Partial index — add via SQL migration:
+  // CREATE INDEX idx_attempts_student_submitted ON attempts (student_id, submitted_at DESC)
+  //   WHERE status = 'submitted';
+  // CREATE INDEX idx_attempts_minor ON attempts (student_id, submitted_at)
+  //   WHERE is_minor_data = true;
+  @@index([studentId, status])
+  @@index([testId, status])
+  @@map("attempts")
+}
+
+model AttemptAnswer {
+  id             String         @id @default(uuid()) @db.Uuid
+  attemptId      String         @map("attempt_id") @db.Uuid
+  questionId     String         @map("question_id") @db.Uuid
+  selectedOption String?        @map("selected_option") @db.VarChar(1)
+  isCorrect      Boolean?       @map("is_correct")
+  timeSpentSecs  Int?           @map("time_spent_secs")
+  confidenceTag  ConfidenceTag? @map("confidence_tag")
+  flagged        Boolean        @default(false)
+
+  attempt               Attempt                @relation(fields: [attemptId], references: [id])
+  question              Question               @relation(fields: [questionId], references: [id])
+  mistakeClassification MistakeClassification?
+  galtiEntry            GaltiNotebookEntry?
+
+  // Partial index — add via SQL migration:
+  // CREATE INDEX idx_attempt_answers_question ON attempt_answers (question_id, is_correct)
+  //   WHERE is_correct IS NOT NULL;
+  @@unique([attemptId, questionId])
+  @@index([attemptId])
+  @@index([questionId])
+  @@map("attempt_answers")
+}
+
+model MistakeClassification {
+  id              String      @id @default(uuid()) @db.Uuid
+  attemptAnswerId String      @unique @map("attempt_answer_id") @db.Uuid
+  studentId       String      @map("student_id") @db.Uuid // denorm for fast aggregation
+  questionId      String      @map("question_id") @db.Uuid
+  mistakeType     MistakeType @map("mistake_type")
+  aiConfidence    Decimal?    @map("ai_confidence") @db.Decimal(4, 3) // 0.0–1.0
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  attemptAnswer AttemptAnswer @relation(fields: [attemptAnswerId], references: [id])
+  student       User          @relation(fields: [studentId], references: [id])
+  question      Question      @relation(fields: [questionId], references: [id])
+
+  @@index([studentId, mistakeType, createdAt])
+  @@index([questionId, mistakeType])
+  @@map("mistake_classifications")
+}
+
+model DiagnosisResult {
+  id                  String       @id @default(uuid()) @db.Uuid
+  attemptId           String       @unique @map("attempt_id") @db.Uuid
+  studentId           String       @map("student_id") @db.Uuid
+  knowledgeRank       Int?         @map("knowledge_rank")
+  strategyRank        Int?         @map("strategy_rank")
+  overconfidentCount  Int          @default(0) @map("overconfident_count") // sure+wrong
+  underconfidentCount Int          @default(0) @map("underconfident_count") // unsure/guess+correct
+  topMistakeType      MistakeType? @map("top_mistake_type")
+  aajKaKaam           String?      @map("aaj_ka_kaam") // "today's one task"
+  readinessPct        Decimal?     @map("readiness_pct") @db.Decimal(5, 2)
+  isMinorData         Boolean      @default(false) @map("is_minor_data")
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz
+
+  attempt Attempt @relation(fields: [attemptId], references: [id])
+  student User    @relation(fields: [studentId], references: [id])
+
+  // Partial index — add via SQL migration:
+  // CREATE INDEX idx_diagnosis_public ON diagnosis_results (student_id, created_at DESC)
+  //   WHERE is_minor_data = false;
+  @@index([studentId, createdAt])
+  @@map("diagnosis_results")
+}
+
+// Personal mistake log — auto-populated on wrong answers, offline-cached on client
+model GaltiNotebookEntry {
+  id              String      @id @default(uuid()) @db.Uuid
+  studentId       String      @map("student_id") @db.Uuid
+  questionId      String      @map("question_id") @db.Uuid
+  attemptAnswerId String      @unique @map("attempt_answer_id") @db.Uuid
+  mistakeType     MistakeType @map("mistake_type")
+  // Anonymised on account deletion (DPDP right to erasure)
+  studentNote     String?     @map("student_note")
+  wrongCount      Int         @default(1) @map("wrong_count")
+  reviewCount     Int         @default(0) @map("review_count")
+  lastReviewed    DateTime?   @map("last_reviewed") @db.Timestamptz
+  isResolved      Boolean     @default(false) @map("is_resolved")
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  student       User          @relation(fields: [studentId], references: [id])
+  question      Question      @relation(fields: [questionId], references: [id])
+  attemptAnswer AttemptAnswer @relation(fields: [attemptAnswerId], references: [id])
+
+  // Partial indexes — add via SQL migration:
+  // CREATE INDEX idx_notebook_unresolved ON galti_notebook_entries
+  //   (student_id, wrong_count DESC, created_at DESC) WHERE is_resolved = false;
+  // CREATE INDEX idx_notebook_recent ON galti_notebook_entries
+  //   (student_id, created_at DESC) WHERE is_resolved = false;
+  @@index([studentId, wrongCount, createdAt])
+  @@map("galti_notebook_entries")
+}
+
+// ============================================================
+// TEACHER CLUSTER
+// ============================================================
+
+model Teacher {
+  id             String         @id @default(uuid()) @db.Uuid
+  userId         String         @unique @map("user_id") @db.Uuid
+  // Encrypted AES-256-GCM at application layer before DB insert
+  panNumber      String?        @map("pan_number") @db.VarChar(255)
+  panVerified    Boolean        @default(false) @map("pan_verified")
+  digilockerRef  String?        @map("digilocker_ref") @db.VarChar(255)
+  examCategories ExamCategory[] @map("exam_categories")
+  status         TeacherStatus  @default(pending)
+  verifiedAt     DateTime?      @map("verified_at") @db.Timestamptz
+
+  user     User             @relation(fields: [userId], references: [id])
+  earnings TeacherEarning[]
+
+  @@map("teachers")
+}
+
+model TeacherEarning {
+  id             String         @id @default(uuid()) @db.Uuid
+  teacherId      String         @map("teacher_id") @db.Uuid
+  testPurchaseId String         @unique @map("test_purchase_id") @db.Uuid
+  // Immutable once paid — financial records. Enforced via DB trigger.
+  grossAmount    Decimal        @map("gross_amount") @db.Decimal(10, 2)
+  platformCut    Decimal        @map("platform_cut") @db.Decimal(10, 2) // 40%
+  teacherAmount  Decimal        @map("teacher_amount") @db.Decimal(10, 2) // 60%
+  status         EarningsStatus @default(pending)
+  paidAt         DateTime?      @map("paid_at") @db.Timestamptz
+
+  teacher      Teacher      @relation(fields: [teacherId], references: [id])
+  testPurchase TestPurchase @relation(fields: [testPurchaseId], references: [id])
+
+  // Partial index — add via SQL migration:
+  // CREATE INDEX idx_earnings_pending ON teacher_earnings (teacher_id, status)
+  //   WHERE status = 'pending';
+  @@index([teacherId, status])
+  @@map("teacher_earnings")
+}
+
+// ============================================================
+// INSTITUTE CLUSTER
+// users → institutes → batches → batch_students
+//                    ├─ dpa_records
+//                    └─ batch_test_assignments
+// ============================================================
+
+model Institute {
+  id               String        @id @default(uuid()) @db.Uuid
+  name             String        @db.VarChar(255)
+  type             InstituteType
+  hasMinorStudents Boolean       @default(false) @map("has_minor_students") // triggers DPA requirement
+  dpaSigned        Boolean       @default(false) @map("dpa_signed")
+  dpaSignedAt      DateTime?     @map("dpa_signed_at") @db.Timestamptz
+  contactUserId    String        @unique @map("contact_user_id") @db.Uuid
+  city             String?       @db.VarChar(100)
+  state            String?       @db.VarChar(100)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  contact         User             @relation("InstituteContact", fields: [contactUserId], references: [id])
+  batches         Batch[]
+  dpaRecords      DpaRecord[]
+  studentProfiles StudentProfile[]
+
+  @@map("institutes")
+}
+
+// Immutable audit trail for DPA agreements — entire table is legally protected.
+// Enforced via DB trigger (prevent_dpa_update) — see migration SQL.
+model DpaRecord {
+  id          String   @id @default(uuid()) @db.Uuid
+  instituteId String   @map("institute_id") @db.Uuid
+  version     String   @db.VarChar(50)
+  signedAt    DateTime @map("signed_at") @db.Timestamptz
+  signedBy    String   @map("signed_by") @db.VarChar(255) // name of signatory
+  ipAddress   String   @map("ip_address") @db.VarChar(45)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  institute Institute @relation(fields: [instituteId], references: [id])
+
+  @@index([instituteId])
+  @@map("dpa_records")
+}
+
+model Batch {
+  id           String       @id @default(uuid()) @db.Uuid
+  instituteId  String       @map("institute_id") @db.Uuid
+  name         String       @db.VarChar(255)
+  examCategory ExamCategory @map("exam_category")
+  isActive     Boolean      @default(true) @map("is_active")
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz
+
+  institute       Institute             @relation(fields: [instituteId], references: [id])
+  students        BatchStudent[]
+  testAssignments BatchTestAssignment[]
+
+  @@index([instituteId])
+  @@map("batches")
+}
+
+model BatchStudent {
+  batchId   String   @map("batch_id") @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz
+
+  batch   Batch          @relation(fields: [batchId], references: [id])
+  student StudentProfile @relation(fields: [studentId], references: [id])
+
+  @@id([batchId, studentId])
+  @@map("batch_students")
+}
+
+model BatchTestAssignment {
+  id        String    @id @default(uuid()) @db.Uuid
+  batchId   String    @map("batch_id") @db.Uuid
+  testId    String    @map("test_id") @db.Uuid
+  opensAt   DateTime  @map("opens_at") @db.Timestamptz
+  closesAt  DateTime? @map("closes_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  batch Batch @relation(fields: [batchId], references: [id])
+  test  Test  @relation(fields: [testId], references: [id])
+
+  @@unique([batchId, testId])
+  @@map("batch_test_assignments")
+}
+
+// ============================================================
+// BATTLE CLUSTER
+// Battle answers stored in Redis during live battle.
+// Flushed to battle_answers table on completion.
+// ============================================================
+
+model Battle {
+  id           String       @id @default(uuid()) @db.Uuid
+  player1Id    String       @map("player_1_id") @db.Uuid
+  player2Id    String?      @map("player_2_id") @db.Uuid
+  testId       String       @map("test_id") @db.Uuid
+  examCategory ExamCategory @map("exam_category")
+  status       BattleStatus @default(waiting)
+  winnerId     String?      @map("winner_id") @db.Uuid
+  startedAt    DateTime?    @map("started_at") @db.Timestamptz
+  endedAt      DateTime?    @map("ended_at") @db.Timestamptz
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz
+
+  player1 User           @relation("BattlePlayer1", fields: [player1Id], references: [id])
+  player2 User?          @relation("BattlePlayer2", fields: [player2Id], references: [id])
+  winner  User?          @relation("BattleWinner", fields: [winnerId], references: [id])
+  test    Test           @relation(fields: [testId], references: [id])
+  answers BattleAnswer[]
+
+  // Partial index for matchmaking — add via SQL migration:
+  // CREATE INDEX idx_battles_matchmaking ON battles (exam_category, status, created_at)
+  //   WHERE status = 'waiting' AND player_2_id IS NULL;
+  @@index([examCategory, status, createdAt])
+  @@map("battles")
+}
+
+model BattleAnswer {
+  id             String   @id @default(uuid()) @db.Uuid
+  battleId       String   @map("battle_id") @db.Uuid
+  playerId       String   @map("player_id") @db.Uuid
+  questionId     String   @map("question_id") @db.Uuid
+  selectedOption String?  @map("selected_option") @db.VarChar(1)
+  isCorrect      Boolean? @map("is_correct")
+  timeSpentSecs  Int?     @map("time_spent_secs")
+
+  battle Battle @relation(fields: [battleId], references: [id])
+
+  @@index([battleId, playerId])
+  @@map("battle_answers")
+}
+
+// ============================================================
+// LIVE TEST CLUSTER
+// ============================================================
+
+model LiveTest {
+  id           String         @id @default(uuid()) @db.Uuid
+  testId       String         @unique @map("test_id") @db.Uuid
+  examCategory ExamCategory   @map("exam_category")
+  scheduledAt  DateTime       @map("scheduled_at") @db.Timestamptz
+  status       LiveTestStatus @default(scheduled)
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  test          Test                   @relation(fields: [testId], references: [id])
+  registrations LiveTestRegistration[]
+
+  // Partial index — add via SQL migration:
+  // CREATE INDEX idx_live_tests_upcoming ON live_tests (exam_category, scheduled_at)
+  //   WHERE status IN ('scheduled', 'lobby_open');
+  @@index([examCategory, scheduledAt])
+  @@map("live_tests")
+}
+
+model LiveTestRegistration {
+  id           String   @id @default(uuid()) @db.Uuid
+  liveTestId   String   @map("live_test_id") @db.Uuid
+  studentId    String   @map("student_id") @db.Uuid
+  registeredAt DateTime @default(now()) @map("registered_at") @db.Timestamptz
+
+  liveTest LiveTest @relation(fields: [liveTestId], references: [id])
+  student  User     @relation(fields: [studentId], references: [id])
+
+  @@unique([liveTestId, studentId])
+  @@map("live_test_registrations")
+}
+
+// ============================================================
+// MISC
+// ============================================================
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  type      String   @db.VarChar(50)
+  title     String   @db.VarChar(255)
+  body      String
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id])
+
+  // Partial index — add via SQL migration:
+  // CREATE INDEX idx_notifications_unread ON notifications (user_id, created_at DESC)
+  //   WHERE is_read = false;
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model ContentReport {
+  id         String   @id @default(uuid()) @db.Uuid
+  reportedBy String   @map("reported_by") @db.Uuid
+  entityType String   @map("entity_type") @db.VarChar(50) // 'question' | 'test'
+  entityId   String   @map("entity_id") @db.Uuid
+  reason     String
+  status     String   @default("pending") @db.VarChar(50) // pending | reviewed | resolved
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  reporter User @relation(fields: [reportedBy], references: [id])
+
+  @@index([status, createdAt])
+  @@map("content_reports")
+}
