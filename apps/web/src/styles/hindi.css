@@ -1,0 +1,16 @@
+.text-hi {
+  font-family: var(--font-noto-devanagari), sans-serif;
+  line-height: 1.8;
+  letter-spacing: 0;
+}
+
+.question-text {
+  font-size: 18px;
+  line-height: 1.85;
+  font-weight: 500;
+}
+
+.option-text {
+  font-size: 15px;
+  line-height: 1.75;
+}
