@@ -31,3 +31,6 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# Claude Code local settings (machine-specific permissions)
+.claude/settings.local.json

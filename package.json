@@ -25,6 +25,18 @@
   "pnpm": {
     "overrides": {
       "ioredis": "5.11.1"
+    },
+    "packageExtensions": {
+      "@fastify/compress": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/cookie": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/cors": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/helmet": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/jwt": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/multipart": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/rate-limit": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/swagger": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/swagger-ui": { "peerDependencies": { "fastify": "*" } },
+      "@fastify/under-pressure": { "peerDependencies": { "fastify": "*" } }
     }
   }
 }
