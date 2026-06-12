@@ -7,19 +7,29 @@ import { prisma } from '@apna-rank/db';
 // Uses Rasch model: P(correct) = e^(θ-β) / (1 + e^(θ-β))
 // where θ = student ability, β = question difficulty.
 
-export const irtWorker = new Worker(
-  'irt',
-  async (job: Job) => {
-    const { questionId } = job.data as { questionId: string };
+export function startIrtWorker(): Worker {
+  const worker = new Worker(
+    'irt',
+    async (job: Job) => {
+      const { questionId } = job.data as { questionId: string };
 
-    // TODO: aggregate correct/incorrect ratio across all non-minor attempts
-    // TODO: run Rasch model calibration
-    // TODO: update question.irt_difficulty
-    console.log(`[irt] Recalibrating question=${questionId}`);
-  },
-  { connection: redis as any },
-);
+      // TODO: aggregate correct/incorrect ratio across all non-minor attempts
+      // TODO: run Rasch model calibration
+      // TODO: update question.irt_difficulty
+      console.log(`[irt] Recalibrating question=${questionId}`);
+    },
+    { connection: redis as any },
+  );
 
-irtWorker.on('failed', (job, err) => {
-  console.error(`[irt] Job ${job?.id} failed:`, err.message);
-});
+  worker.on('error', (err) => {
+    console.error('[irt] Worker error:', (err as any).message ?? err);
+  });
+  worker.on('failed', (job, err) => {
+    console.error(`[irt] Job ${job?.id} failed:`, err.message);
+  });
+  worker.on('completed', (job) => {
+    console.log(`[irt] Job ${job?.id} completed`);
+  });
+
+  return worker;
+}

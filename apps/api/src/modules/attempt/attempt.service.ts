@@ -91,15 +91,16 @@ export async function saveAnswer(
   });
   if (!attempt) throw new NotFoundError('Active attempt');
 
-  const question = await prisma.question.findUnique({
-    where: { id: data.questionId },
-    select: { correctOption: true },
+  // Validate the questionId belongs to this test — prevents cross-test answer injection
+  const testQuestion = await prisma.testQuestion.findUnique({
+    where: { testId_questionId: { testId: attempt.testId, questionId: data.questionId } },
+    select: { question: { select: { correctOption: true } } },
   });
-  if (!question) throw new NotFoundError('Question');
+  if (!testQuestion) throw new NotFoundError('Question not found in this test');
 
   const selectedOption = data.selectedOption ?? null;
   const isCorrect =
-    selectedOption !== null ? selectedOption === question.correctOption : null;
+    selectedOption !== null ? selectedOption === testQuestion.question.correctOption : null;
 
   await prisma.attemptAnswer.upsert({
     where: { attemptId_questionId: { attemptId, questionId: data.questionId } },
@@ -193,6 +194,68 @@ export async function submitAttempt(
     answeredCount: savedAnswers.filter((a) => a.selectedOption !== null).length,
     diagnosisQueued: true,
   };
+}
+
+// ─── List attempts (paginated) ────────────────────────────────
+
+export async function listAttempts(userId: string, page: number, limit: number) {
+  const skip = (page - 1) * limit;
+  const [attempts, total] = await Promise.all([
+    prisma.attempt.findMany({
+      where: { studentId: userId },
+      orderBy: { startedAt: 'desc' },
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        testId: true,
+        status: true,
+        score: true,
+        totalMarks: true,
+        timeTakenSecs: true,
+        startedAt: true,
+        submittedAt: true,
+        test: { select: { title: true, examCategory: true, type: true } },
+      },
+    }),
+    prisma.attempt.count({ where: { studentId: userId } }),
+  ]);
+  return { attempts, total };
+}
+
+// ─── Single attempt detail ─────────────────────────────────────
+
+export async function getAttemptDetail(attemptId: string, userId: string) {
+  const attempt = await prisma.attempt.findUnique({
+    where: { id: attemptId },
+    select: {
+      id: true,
+      testId: true,
+      studentId: true,
+      status: true,
+      score: true,
+      totalMarks: true,
+      timeTakenSecs: true,
+      startedAt: true,
+      submittedAt: true,
+      test: {
+        select: { title: true, examCategory: true, type: true, durationSecs: true },
+      },
+      answers: {
+        select: {
+          questionId: true,
+          selectedOption: true,
+          isCorrect: true,
+          timeSpentSecs: true,
+          confidenceTag: true,
+          flagged: true,
+        },
+      },
+    },
+  });
+  if (!attempt) throw new NotFoundError('Attempt');
+  if (attempt.studentId !== userId) throw new ForbiddenError();
+  return attempt;
 }
 
 // ─── Result ───────────────────────────────────────────────────

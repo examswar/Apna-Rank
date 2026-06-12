@@ -21,14 +21,21 @@ export async function unreadCount(userId: string): Promise<number> {
 }
 
 export async function markRead(notificationId: string, userId: string): Promise<void> {
-  const notif = await prisma.notification.findUnique({ where: { id: notificationId } });
-  if (!notif) throw new NotFoundError('Notification');
-  if (notif.userId !== userId) throw new ForbiddenError();
-
-  await prisma.notification.update({
-    where: { id: notificationId },
+  // Atomic ownership check + update in one round-trip.
+  // Avoids a TOCTOU race where the notification is deleted between findUnique and update,
+  // which would cause Prisma to throw P2025 (unhandled → 500 error).
+  const result = await prisma.notification.updateMany({
+    where: { id: notificationId, userId },
     data: { isRead: true },
   });
+  if (result.count === 0) {
+    const exists = await prisma.notification.findUnique({
+      where: { id: notificationId },
+      select: { userId: true },
+    });
+    if (!exists) throw new NotFoundError('Notification');
+    throw new ForbiddenError();
+  }
 }
 
 export async function markAllRead(userId: string): Promise<number> {

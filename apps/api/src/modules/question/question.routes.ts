@@ -65,9 +65,11 @@ export default async function questionRoutes(app: FastifyInstance) {
   });
 
   // GET /api/v1/questions/:id
+  // correctOption is only returned to platform_admin; students receive it without the answer.
   app.get('/questions/:id', auth, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const question = await QuestionService.getQuestion(id);
+    const includeAnswer = request.user.role === 'platform_admin';
+    const question = await QuestionService.getQuestion(id, includeAnswer);
     return reply.status(200).send(ok(question));
   });
 

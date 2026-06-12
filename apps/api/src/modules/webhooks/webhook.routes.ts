@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { prisma } from '@apna-rank/db';
 import { config } from '../../lib/config';
 import { fail } from '../../lib/response';
@@ -35,7 +35,15 @@ export default async function webhookRoutes(app: FastifyInstance) {
       .update(rawBody)
       .digest('hex');
 
-    if (expected !== signature) {
+    // Constant-time compare. A plain !== leaks, via response timing, how many
+    // leading bytes of a forged signature are correct — enough to brute-force a
+    // valid signature byte-by-byte. Lengths must match before timingSafeEqual.
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    const signatureBuf = Buffer.from(signature, 'utf8');
+    if (
+      expectedBuf.length !== signatureBuf.length ||
+      !timingSafeEqual(expectedBuf, signatureBuf)
+    ) {
       app.log.warn('[webhook] Invalid Razorpay signature — request rejected');
       return reply.status(400).send(fail('INVALID_SIGNATURE', 'Webhook signature mismatch'));
     }

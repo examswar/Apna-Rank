@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@apna-rank/db', () => ({
   prisma: {
     test:        { findFirst: vi.fn() },
-    battle:      { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), count: vi.fn(), findMany: vi.fn() },
+    battle:      { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     battleAnswer: { createMany: vi.fn() },
   },
 }));
@@ -25,6 +25,7 @@ vi.mock('../lib/redis', () => ({
     get:    vi.fn(),
     del:    vi.fn(),
     lpop:   vi.fn(),
+    lpush:  vi.fn(),
     rpush:  vi.fn(),
     expire: vi.fn(),
   },
@@ -132,6 +133,7 @@ beforeEach(() => {
     return keys.length;
   });
   (redis.lpop as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+  (redis.lpush as ReturnType<typeof vi.fn>).mockResolvedValue(1);
   (redis.rpush as ReturnType<typeof vi.fn>).mockResolvedValue(1);
   (redis.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
@@ -193,6 +195,19 @@ beforeEach(() => {
     return updated;
   });
 
+  // Prisma — battle.updateMany (conditional atomic update against the store;
+  // mirrors the where-guards the service relies on for TOCTOU safety)
+  (prisma.battle.updateMany as ReturnType<typeof vi.fn>).mockImplementation(async ({ where, data }: any) => {
+    const raw = redisStore.get(`__db:battle:${where.id}`);
+    if (!raw) return { count: 0 };
+    const battle = JSON.parse(raw);
+    if (where.status !== undefined && battle.status !== where.status) return { count: 0 };
+    if (where.player2Id !== undefined && battle.player2Id !== where.player2Id) return { count: 0 };
+    if (where.player1Id?.not !== undefined && battle.player1Id === where.player1Id.not) return { count: 0 };
+    redisStore.set(`__db:battle:${where.id}`, JSON.stringify({ ...battle, ...data }));
+    return { count: 1 };
+  });
+
   (prisma.battle.count   as ReturnType<typeof vi.fn>).mockResolvedValue(0);
   (prisma.battle.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   (prisma.battleAnswer.createMany as ReturnType<typeof vi.fn>).mockResolvedValue({ count: 0 });
@@ -243,7 +258,7 @@ describe('joinByInviteCode', () => {
 
     // player1 must be notified
     expect(mockTo).toHaveBeenCalledWith(`battle:${BATTLE_ID}`);
-    expect(mockEmit).toHaveBeenCalledWith('player2_joined', { battleId: BATTLE_ID, player2Id: PLAYER2_ID });
+    expect(mockEmit).toHaveBeenCalledWith('opponent_joined', { battleId: BATTLE_ID, player2Id: PLAYER2_ID });
 
     // invite code cleaned up
     expect(redisStore.has(`battle:invite:TESTCODE`)).toBe(false);
@@ -329,7 +344,11 @@ describe('resolveBattle', () => {
 
     const updateCall = (prisma.battle.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(updateCall.data.winnerId).toBe(PLAYER1_ID);
-    expect(updateCall.data.status).toBe('completed');
+    // status transition happens via the atomic updateMany guard, not update
+    expect(prisma.battle.updateMany).toHaveBeenCalledWith({
+      where: { id: BATTLE_ID, status: 'active' },
+      data: { status: 'completed' },
+    });
 
     expect(mockEmit).toHaveBeenCalledWith('battle_result', expect.objectContaining({
       winnerId: PLAYER1_ID,
@@ -444,7 +463,7 @@ describe('Full two-player flow (challenge → join → answer → result)', () =
     expect(join.status).toBe('active');
 
     // player1 must have been notified
-    expect(mockEmit).toHaveBeenCalledWith('player2_joined', expect.objectContaining({ player2Id: PLAYER2_ID }));
+    expect(mockEmit).toHaveBeenCalledWith('opponent_joined', expect.objectContaining({ player2Id: PLAYER2_ID }));
 
     // ── Step 3: Both players submit all answers (via socket handler writes) ──
     redisStore.set(`battle:${BATTLE_ID}:state`, buildActiveBattleState());

@@ -18,6 +18,8 @@ import { redis } from './lib/redis';
 
 import { startDiagnosisWorker } from './jobs/diagnosis.worker';
 import { startBattleWorker } from './jobs/battle.worker';
+import { startIrtWorker } from './jobs/irt.worker';
+import { startNotificationWorker } from './jobs/notification.worker';
 import { setupBattleNamespace } from './modules/battle/battle.socket';
 
 import authRoutes         from './modules/auth/auth.routes';
@@ -35,7 +37,14 @@ import webhookRoutes      from './modules/webhooks/webhook.routes';
 async function main() {
   const app = Fastify({
     logger: { level: config.isDev ? 'info' : 'warn' },
-    trustProxy: true,
+    // Trust ONLY the configured number of proxy hops. `true` trusts every hop,
+    // letting a client forge X-Forwarded-For and thus req.ip — which defeats
+    // IP-based rate limiting and the OTP abuse caps.
+    trustProxy: config.trustedProxyHops,
+    // Reject bodies over 1 MB and drop connections that hang past 30s — basic
+    // payload/slow-client DoS hardening (Fastify has no RSS circuit breaker here).
+    bodyLimit: 1_048_576,
+    connectionTimeout: 30_000,
   });
 
   // Allow empty JSON bodies on endpoints that don't require a body (e.g. POST /publish).
@@ -84,18 +93,21 @@ async function main() {
       fail('RATE_LIMIT', 'Bahut zyada requests. Ek minute ruko.'),
   });
 
-  await app.register(fastifySwagger, {
-    openapi: {
-      info: { title: 'Apna Rank API', version: '1.0.0' },
-      servers: [{ url: `http://localhost:${config.port}` }],
-      components: {
-        securitySchemes: {
-          bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+  // API docs expose the full route/schema surface — never serve them in prod.
+  if (!config.isProd) {
+    await app.register(fastifySwagger, {
+      openapi: {
+        info: { title: 'Apna Rank API', version: '1.0.0' },
+        servers: [{ url: `http://localhost:${config.port}` }],
+        components: {
+          securitySchemes: {
+            bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+          },
         },
       },
-    },
-  });
-  await app.register(fastifySwaggerUi, { routePrefix: '/docs' });
+    });
+    await app.register(fastifySwaggerUi, { routePrefix: '/docs' });
+  }
 
   // ── Global error handler ───────────────────────────────────
   app.setErrorHandler((err: unknown, _req, reply) => {
@@ -156,7 +168,9 @@ async function main() {
     await redis.ping();
     startDiagnosisWorker();
     startBattleWorker();
-    console.log('    Workers: diagnosis + battle workers started');
+    startIrtWorker();
+    startNotificationWorker();
+    console.log('    Workers: diagnosis + battle + irt + notification workers started');
   } catch {
     console.log('    Workers: Redis unavailable — workers skipped (dev fallback active)');
   }
@@ -178,6 +192,21 @@ async function main() {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
+
+  // This is a single-process server. In Node, an unhandled promise rejection
+  // terminates the process by default — so one floating rejection inside a
+  // request handler (easy for an attacker to provoke with a malformed payload)
+  // would take the whole API down. Log and keep serving; Fastify's error handler
+  // already turns in-request errors into clean 4xx/5xx responses. Wire to Sentry.
+  process.on('unhandledRejection', (reason) => {
+    app.log.error({ reason }, 'unhandledRejection');
+  });
+  // An uncaught exception leaves global state undefined — log and let the
+  // process manager restart us cleanly rather than limping along.
+  process.on('uncaughtException', (err) => {
+    app.log.error(err, 'uncaughtException');
+    shutdown('uncaughtException');
+  });
 }
 
 main().catch((err) => {

@@ -24,8 +24,9 @@ export default async function diagnosisRoutes(app: FastifyInstance) {
   });
 
   // GET /api/v1/diagnosis/leaderboard — percentile rank (adults only — DPDP Layer 1)
-  app.get('/leaderboard', publicAuth, async (_request, reply) => {
-    return reply.status(200).send(ok({ rank: null, percentile: null, total: 0 }));
+  app.get('/leaderboard', publicAuth, async (request, reply) => {
+    const result = await DiagnosisService.getLeaderboard(request.user.id);
+    return reply.status(200).send(ok(result));
   });
 
   // GET /api/v1/diagnosis/:attemptId — full diagnosis + Mistake DNA breakdown

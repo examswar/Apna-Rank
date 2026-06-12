@@ -1,6 +1,7 @@
 import { prisma } from '@apna-rank/db';
 import { NotFoundError, ForbiddenError } from '../../lib/errors';
 
+// Full select used only by platform_admin (create/update paths).
 const Q_FULL_SELECT = {
   id: true,
   examCategory: true,
@@ -14,6 +15,24 @@ const Q_FULL_SELECT = {
   options: true,
   correctOption: true,
   explanation: true,
+  attemptCount: true,
+  isActive: true,
+  createdAt: true,
+  creator: { select: { id: true, name: true } },
+} as const;
+
+// Public select: correctOption and explanation are withheld from students.
+const Q_PUBLIC_SELECT = {
+  id: true,
+  examCategory: true,
+  subject: true,
+  topic: true,
+  subTopic: true,
+  language: true,
+  difficultyTag: true,
+  irtDifficulty: true,
+  questionText: true,
+  options: true,
   attemptCount: true,
   isActive: true,
   createdAt: true,
@@ -96,10 +115,10 @@ export async function listQuestions(
   return { questions, total };
 }
 
-export async function getQuestion(id: string) {
+export async function getQuestion(id: string, includeAnswer = false) {
   const q = await prisma.question.findUnique({
     where: { id, isActive: true },
-    select: Q_FULL_SELECT,
+    select: includeAnswer ? Q_FULL_SELECT : Q_PUBLIC_SELECT,
   });
   if (!q) throw new NotFoundError('Question');
   return q;

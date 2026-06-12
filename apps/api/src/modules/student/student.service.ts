@@ -63,13 +63,20 @@ export async function upsertProfile(
     languagePref?: string;
   },
 ) {
-  const profile = await prisma.studentProfile.update({
+  const profileData = {
+    ...(data.examCategory && { examCategory: data.examCategory as any }),
+    ...(data.examSubType !== undefined && { examSubType: data.examSubType }),
+    ...(data.targetYear !== undefined && { targetYear: data.targetYear }),
+    ...(data.examDate && { examDate: new Date(data.examDate) }),
+  };
+
+  const profile = await prisma.studentProfile.upsert({
     where: { userId },
-    data: {
-      ...(data.examCategory && { examCategory: data.examCategory as any }),
-      ...(data.examSubType !== undefined && { examSubType: data.examSubType }),
-      ...(data.targetYear !== undefined && { targetYear: data.targetYear }),
-      ...(data.examDate && { examDate: new Date(data.examDate) }),
+    update: profileData,
+    create: {
+      userId,
+      examCategory: (data.examCategory ?? 'SSC_CGL') as any,
+      ...profileData,
     },
   });
 
@@ -94,13 +101,15 @@ export async function onboardingExam(
     attemptNumber?: number; // TODO: add attempt_number INT column to student_profiles via migration
   },
 ) {
-  return prisma.studentProfile.update({
+  const profileData = {
+    examCategory: data.examCategory as any,
+    ...(data.examSubType !== undefined && { examSubType: data.examSubType }),
+    ...(data.targetYear !== undefined && { targetYear: data.targetYear }),
+  };
+  return prisma.studentProfile.upsert({
     where: { userId },
-    data: {
-      examCategory: data.examCategory as any,
-      ...(data.examSubType !== undefined && { examSubType: data.examSubType }),
-      ...(data.targetYear !== undefined && { targetYear: data.targetYear }),
-    },
+    update: profileData,
+    create: { userId, ...profileData },
   });
 }
 
@@ -400,6 +409,97 @@ export async function getDashboard(userId: string) {
       ? Number(profile.baselineLevel)
       : null,
   };
+}
+
+// ─── Progress (30-day activity calendar) ─────────────────────
+
+export async function getProgress(userId: string) {
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 29);
+  thirtyDaysAgo.setHours(0, 0, 0, 0);
+
+  const attempts = await prisma.attempt.findMany({
+    where: {
+      studentId: userId,
+      status: 'submitted',
+      submittedAt: { gte: thirtyDaysAgo },
+    },
+    select: { submittedAt: true, score: true, totalMarks: true },
+    orderBy: { submittedAt: 'asc' },
+  });
+
+  const dayMap = new Map<string, { count: number; totalPct: number }>();
+  for (const a of attempts) {
+    const key = a.submittedAt!.toISOString().slice(0, 10);
+    if (!dayMap.has(key)) dayMap.set(key, { count: 0, totalPct: 0 });
+    const d = dayMap.get(key)!;
+    d.count++;
+    if (a.score != null && a.totalMarks != null && Number(a.totalMarks) > 0) {
+      d.totalPct += (Number(a.score) / Number(a.totalMarks)) * 100;
+    }
+  }
+
+  const days: Array<{ date: string; attemptCount: number; avgScorePct: number | null }> = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const day = dayMap.get(key);
+    days.push({
+      date: key,
+      attemptCount: day?.count ?? 0,
+      avgScorePct: day && day.count > 0 ? Math.round(day.totalPct / day.count) : null,
+    });
+  }
+
+  return { days };
+}
+
+// ─── Readiness (topic-level accuracy breakdown) ───────────────
+
+export async function getReadiness(userId: string) {
+  const profile = await prisma.studentProfile.findUnique({
+    where: { userId },
+    select: { examCategory: true, baselineLevel: true },
+  });
+  if (!profile) throw new NotFoundError('Student profile');
+
+  const answers = await prisma.attemptAnswer.findMany({
+    where: {
+      attempt: { studentId: userId, status: 'submitted' },
+      isCorrect: { not: null },
+      question: { examCategory: profile.examCategory as any },
+    },
+    select: {
+      isCorrect: true,
+      question: { select: { topic: true, subject: true } },
+    },
+    take: 1000,
+  });
+
+  const topicStats: Record<string, { correct: number; total: number }> = {};
+  for (const a of answers) {
+    const label = a.question.topic ?? a.question.subject ?? 'General';
+    topicStats[label] ??= { correct: 0, total: 0 };
+    topicStats[label].total++;
+    if (a.isCorrect) topicStats[label].correct++;
+  }
+
+  const readyTopics: string[] = [];
+  const remainingTopics: string[] = [];
+  for (const [topic, stats] of Object.entries(topicStats)) {
+    if (stats.total >= 3) {
+      (stats.correct / stats.total >= 0.7 ? readyTopics : remainingTopics).push(topic);
+    }
+  }
+
+  const totalTopics = readyTopics.length + remainingTopics.length;
+  const readinessPct =
+    totalTopics > 0
+      ? Math.round((readyTopics.length / totalTopics) * 100)
+      : (profile.baselineLevel ? Number(profile.baselineLevel) : 0);
+
+  return { readyTopics, remainingTopics, readinessPct };
 }
 
 // ─── Galti Notebook ───────────────────────────────────────────

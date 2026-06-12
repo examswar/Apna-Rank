@@ -39,6 +39,17 @@ const envSchema = z.object({
 
   APP_BASE_URL: z.string().default('http://localhost:3000'),
 
+  // Number of reverse-proxy hops in front of the app (e.g. 1 = one load
+  // balancer). Drives Fastify trustProxy so req.ip is the real client IP and
+  // cannot be forged via X-Forwarded-For to defeat rate limiting.
+  TRUSTED_PROXY_HOPS: z.string().default('1'),
+
+  // OPT-IN local-dev OTP shortcut: store the OTP in memory + print it to the
+  // console and skip the real SMS send. Defaults OFF and is INDEPENDENT of
+  // NODE_ENV on purpose — a prod box that forgets to set NODE_ENV must NEVER
+  // silently fall into "dev OTP" mode. There is no master/bypass OTP.
+  AUTH_DEV_OTP: z.enum(['true', 'false']).default('false'),
+
   SENTRY_DSN: z.string().optional(),
 });
 
@@ -55,6 +66,9 @@ export const config = {
   port: parseInt(parsed.data.PORT, 10),
   isDev: parsed.data.NODE_ENV === 'development',
   isProd: parsed.data.NODE_ENV === 'production',
+  trustedProxyHops: parseInt(parsed.data.TRUSTED_PROXY_HOPS, 10),
+  // Dev OTP shortcut is allowed ONLY when explicitly opted in AND not in prod.
+  devOtp: parsed.data.AUTH_DEV_OTP === 'true' && parsed.data.NODE_ENV !== 'production',
   allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(',').map((o) => o.trim()),
   // Normalise PEM keys — Railway stores newlines as \n literals
   jwtPrivateKey: parsed.data.JWT_PRIVATE_KEY.replace(/\\n/g, '\n'),

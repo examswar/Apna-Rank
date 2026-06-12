@@ -4,6 +4,7 @@ import { prisma, encryptField } from '@apna-rank/db';
 import { redis, KEYS } from '../../lib/redis';
 import { config } from '../../lib/config';
 import {
+  AppError,
   ConflictError,
   UnauthorizedError,
   ValidationError,
@@ -11,11 +12,14 @@ import {
   NotFoundError,
 } from '../../lib/errors';
 
-const OTP_TTL_SECS = 5 * 60;    // 5 minutes
-const OTP_RATE_LIMIT = 3;        // per 15 minutes
+const OTP_TTL_SECS = 5 * 60;     // 5 minutes
+const OTP_RATE_LIMIT = 3;         // sends per phone per 15 minutes
+const OTP_IP_LIMIT = 10;          // sends per IP per 15 minutes (anti SMS-bombing)
+const OTP_MAX_VERIFY_ATTEMPTS = 5; // wrong guesses before the OTP is burned
 const REFRESH_TTL_SECS = 7 * 24 * 60 * 60;
 
-// Dev-only in-memory OTP store (no Redis required in development)
+// Dev-only in-memory OTP store. Used ONLY when config.devOtp is true
+// (AUTH_DEV_OTP=true and NODE_ENV !== production). Never reachable in prod.
 const devOtpCache = new Map<string, string>(); // phone → otpHash
 
 function hashOtp(otp: string): string {
@@ -26,36 +30,67 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export async function sendOtp(phone: string): Promise<void> {
+export async function sendOtp(phone: string, ip: string): Promise<void> {
   const otp = String(randomInt(100000, 999999));
   const otpHash = hashOtp(otp);
 
-  if (config.isDev) {
-    // No Redis required in dev — store in memory and log OTP to console
+  if (config.devOtp) {
+    // Explicit local-dev shortcut only. Never reachable in production.
     devOtpCache.set(phone, otpHash);
     console.log(`[DEV] OTP for ${phone}: ${otp}`);
   } else {
+    // Limit 1: OTP sends per phone per 15 minutes. incr returns the post-increment
+    // value, so the Nth allowed send has count === N. Block once it EXCEEDS the
+    // limit (count > OTP_RATE_LIMIT), so exactly OTP_RATE_LIMIT sends are allowed.
     const rateKey = `rate:otp:${phone}`;
-    const count = await redis.incr(rateKey);
-    if (count === 1) await redis.expire(rateKey, 15 * 60);
+    const [count] = await redis.pipeline().incr(rateKey).expire(rateKey, 15 * 60, 'NX').exec() as [number, ...any[]];
     if (count > OTP_RATE_LIMIT) {
       throw new RateLimitError('OTP limit exceeded. 15 minutes baad try karo.');
     }
 
-    await redis.set(KEYS.otp(phone), otpHash, 'EX', OTP_TTL_SECS);
+    // Limit 2: OTP sends per source IP per 15 minutes. Stops an attacker rotating
+    // through thousands of valid-format numbers (each under its own per-phone cap)
+    // to run up SMS cost / toll fraud. Meaningful only because trustProxy is now a
+    // fixed hop count, so X-Forwarded-For can't mint fresh IP buckets.
+    const ipKey = `rate:otp:ip:${ip}`;
+    const [ipCount] = await redis.pipeline().incr(ipKey).expire(ipKey, 15 * 60, 'NX').exec() as [number, ...any[]];
+    if (ipCount > OTP_IP_LIMIT) {
+      throw new RateLimitError('Bahut zyada requests. 15 minutes baad try karo.');
+    }
 
-    await fetch('https://api.msg91.com/api/v5/otp', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        authkey: config.MSG91_AUTH_KEY,
-      },
-      body: JSON.stringify({
-        mobile: `91${phone}`,
-        template_id: config.MSG91_TEMPLATE_ID,
-        otp,
-      }),
-    });
+    await redis.set(KEYS.otp(phone), otpHash, 'EX', OTP_TTL_SECS);
+    // Reset any stale verify-attempt counter from a previous OTP for this phone.
+    await redis.del(`otp:attempts:${phone}`);
+
+    // Always bound the upstream call: a hung MSG91 would otherwise hold the
+    // request (and its DB/Redis work) open and exhaust the worker under load.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const smsResp = await fetch('https://api.msg91.com/api/v5/otp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          authkey: config.MSG91_AUTH_KEY,
+        },
+        body: JSON.stringify({
+          mobile: `91${phone}`,
+          template_id: config.MSG91_TEMPLATE_ID,
+          otp,
+        }),
+        signal: controller.signal,
+      });
+      if (!smsResp.ok) {
+        const errBody = await smsResp.text().catch(() => '');
+        console.error(`[auth] MSG91 error ${smsResp.status}: ${errBody}`);
+        throw new ValidationError('SMS delivery failed — thodi der baad try karo');
+      }
+    } catch (err) {
+      if (err instanceof ValidationError) throw err;
+      throw new ValidationError('SMS delivery failed — thodi der baad try karo');
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   await prisma.otpRequest.create({
@@ -71,42 +106,77 @@ export async function verifyOtpAndIssueTokens(
   body: { phone: string; otp: string; name?: string; dob?: string },
   app: FastifyInstance,
 ) {
-  // Dev bypass: accept fixed OTP "123456" without checking stored hash
-  if (config.isDev && body.otp === '123456') {
-    // allow through — test-only shortcut
-  } else {
-    const storedHash = config.isDev
-      ? (devOtpCache.get(body.phone) ?? null)
-      : await redis.get(KEYS.otp(body.phone));
+  // No master/bypass OTP. The stored hash must match the submitted OTP.
+  const storedHash = config.devOtp
+    ? (devOtpCache.get(body.phone) ?? null)
+    : await redis.get(KEYS.otp(body.phone));
 
-    if (!storedHash || storedHash !== hashOtp(body.otp)) {
-      throw new ValidationError('OTP galat hai ya expire ho gaya');
+  if (!storedHash || storedHash !== hashOtp(body.otp)) {
+    // Brute-force lockout: a 6-digit OTP is only 900k combinations and lives
+    // 5 minutes. Without a per-OTP attempt cap an attacker can guess it. Count
+    // wrong guesses for this phone and burn the OTP after OTP_MAX_VERIFY_ATTEMPTS.
+    if (!config.devOtp) {
+      const attemptKey = `otp:attempts:${body.phone}`;
+      const [attempts] = await redis.pipeline().incr(attemptKey).expire(attemptKey, OTP_TTL_SECS, 'NX').exec() as [number, ...any[]];
+      if (attempts >= OTP_MAX_VERIFY_ATTEMPTS) {
+        await redis.del(KEYS.otp(body.phone));
+        await redis.del(attemptKey);
+      }
     }
+    throw new ValidationError('OTP galat hai ya expire ho gaya');
   }
 
-  if (config.isDev) {
+  // Look up the user BEFORE consuming the OTP. A first-time user's first
+  // verify call won't carry name/dob — if we burned the OTP before telling
+  // them, the retry with details would fail with "OTP galat" and signup
+  // would be impossible. The OTP is only consumed once we can proceed.
+  let user = await prisma.user.findUnique({ where: { phone: body.phone } });
+
+  // DOB is mandatory at signup. If it were optional, a minor could simply omit
+  // it, be stored as isMinor=false, and walk past every blockMinors guard and
+  // the DPDP minor-data firewall.
+  if (!user && (!body.name || !body.dob)) {
+    throw new AppError(
+      422,
+      'NEW_USER_DETAILS_REQUIRED',
+      'Naya account: naam aur date of birth zaroori hai',
+    );
+  }
+
+  if (config.devOtp) {
     devOtpCache.delete(body.phone);
   } else {
     await redis.del(KEYS.otp(body.phone));
+    await redis.del(`otp:attempts:${body.phone}`);
   }
 
-  let user = await prisma.user.findUnique({ where: { phone: body.phone } });
+  // Mark the most recent OtpRequest row as verified so the DB reflects the consumed state.
+  await prisma.otpRequest.updateMany({
+    where: { phone: body.phone, verified: false, expiresAt: { gt: new Date() } },
+    data: { verified: true },
+  });
 
   if (!user) {
-    if (!body.name) throw new ValidationError('Name required for new users');
-    const dob = body.dob ? new Date(body.dob) : undefined;
-    const isMinor = dob ? isUnder18(dob) : false;
+    // captured as consts — TS narrowing on body.* doesn't survive into the
+    // transaction closure below
+    const name = body.name!;
+    const dob = new Date(body.dob!);
+    const isMinor = isUnder18(dob);
 
-    user = await prisma.user.create({
-      data: { phone: body.phone, name: body.name, dob, isMinor, isActive: true },
-    });
-
-    await prisma.studentProfile.create({
-      data: {
-        userId: user.id,
-        examCategory: 'SSC_CGL', // default; updated during onboarding
-        isMinorData: isMinor,
-      },
+    // Create user + profile in a single transaction — if profile create fails the
+    // user row is rolled back, preventing an orphaned user with no profile.
+    user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: { phone: body.phone, name, dob, isMinor, isActive: true },
+      });
+      await tx.studentProfile.create({
+        data: {
+          userId: created.id,
+          examCategory: 'SSC_CGL', // default; updated during onboarding
+          isMinorData: isMinor,
+        },
+      });
+      return created;
     });
 
     // DPDP: minor self-registration requires parental consent within 48h
@@ -132,12 +202,16 @@ export async function rotateTokens(
 
   if (!stored) throw new UnauthorizedError('Refresh token invalid or expired');
 
+  // Issue new tokens BEFORE revoking the old one.
+  // If issueTokens fails, the old token remains valid and the user stays logged in.
+  const tokens = await issueTokens(stored.user, app);
+
   await prisma.refreshToken.update({
     where: { id: stored.id },
     data: { revokedAt: new Date() },
   });
 
-  return issueTokens(stored.user, app);
+  return tokens;
 }
 
 export async function revokeRefreshToken(
@@ -230,26 +304,21 @@ export async function submitParentalConsent(
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000);
 
-  const [consent] = await prisma.$transaction([
-    prisma.parentalConsent.create({
-      data: {
-        userId: minorUserId,
-        guardianPhone: encryptedPhone,
-        approvedAt: now,
-        expiresAt,
-      },
-    }),
-    prisma.user.update({
-      where: { id: minorUserId },
-      data: {
-        consentGiven: true,
-        consentAt: now,
-        consentGuardianId: guardianPhone.slice(-4),
-      },
-    }),
-  ]);
+  // Create a PENDING consent record — approvedAt stays null until the guardian
+  // completes OTP verification via a separate /consent/verify step.
+  // Do NOT set consentGiven: true here; that is set only after guardian OTP is confirmed.
+  const consent = await prisma.parentalConsent.create({
+    data: {
+      userId: minorUserId,
+      guardianPhone: encryptedPhone,
+      approvedAt: null,
+      expiresAt,
+    },
+  });
 
-  return { consentId: consent.id, approvedAt: consent.approvedAt };
+  // TODO: enqueue guardian OTP via notificationQueue so guardian can verify consent
+
+  return { consentId: consent.id, status: 'pending', expiresAt: consent.expiresAt };
 }
 
 // ── Helpers ──────────────────────────────────────────────────

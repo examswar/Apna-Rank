@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { prisma } from '@apna-rank/db';
 import { redis, KEYS, battleQueue, diagnosisQueue, JOBS } from '../../lib/redis';
 import { NotFoundError, ForbiddenError, ConflictError } from '../../lib/errors';
@@ -10,9 +11,9 @@ const BATTLE_STATE_TTL = 7200; // 2 h — Redis battle state lifetime
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function generateInviteCode(): string {
-  // Unambiguous alphanumeric set (no 0/O, 1/I/L)
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L ambiguity
+  const bytes = randomBytes(8);
+  return Array.from(bytes, (b) => chars[b % chars.length]).join('');
 }
 
 // ── Create challenge invite ───────────────────────────────────────────────────
@@ -71,15 +72,20 @@ export async function joinByInviteCode(inviteCode: string, userId: string) {
   const battleId = await redis.get(KEYS.battleInvite(inviteCode));
   if (!battleId) throw new NotFoundError('Battle invite');
 
-  const battle = await prisma.battle.findUnique({ where: { id: battleId } });
-  if (!battle) throw new NotFoundError('Battle');
-  if (battle.status !== 'waiting') throw new ConflictError('Battle is no longer open');
-  if (battle.player1Id === userId) throw new ConflictError('Cannot join your own battle');
-
-  await prisma.battle.update({
-    where: { id: battleId },
+  // Atomic update: only succeeds if the battle is still WAITING and not your own.
+  // This prevents the TOCTOU race where two players both read 'waiting' and both join.
+  const updated = await prisma.battle.updateMany({
+    where: { id: battleId, status: 'waiting', player2Id: null, player1Id: { not: userId } },
     data: { player2Id: userId, status: 'active', startedAt: new Date() },
   });
+  if (updated.count === 0) {
+    const battle = await prisma.battle.findUnique({ where: { id: battleId }, select: { player1Id: true, status: true } });
+    if (!battle) throw new NotFoundError('Battle');
+    if (battle.player1Id === userId) throw new ConflictError('Cannot join your own battle');
+    throw new ConflictError('Battle is no longer open');
+  }
+  const battle = await prisma.battle.findUnique({ where: { id: battleId }, select: { player1Id: true, testId: true } });
+  if (!battle) throw new NotFoundError('Battle');
 
   const stateRaw = await redis.get(KEYS.battleState(battleId));
   const state = stateRaw ? JSON.parse(stateRaw) : {};
@@ -93,7 +99,7 @@ export async function joinByInviteCode(inviteCode: string, userId: string) {
   await redis.del(KEYS.battleInvite(inviteCode));
 
   // Notify player1 if they are already in the Socket.io room
-  battleNsRef.get()?.to(`battle:${battleId}`).emit('player2_joined', {
+  battleNsRef.get()?.to(`battle:${battleId}`).emit('opponent_joined', {
     battleId,
     player2Id: userId,
   });
@@ -122,10 +128,10 @@ export async function matchmake(userId: string, examCategory: string) {
     });
 
     if (!test) {
-      // No test available — put opponent back and queue self
-      await redis.rpush(queueKey, opponentId);
+      // No test available — restore opponent at HEAD (lpush) so they keep their wait priority
+      await redis.lpush(queueKey, opponentId);
       await redis.rpush(queueKey, userId);
-      await redis.expire(queueKey, 60);
+      await redis.expire(queueKey, 60, 'NX');
       return { battleId: null, status: 'waiting' as const };
     }
 
@@ -166,14 +172,14 @@ export async function matchmake(userId: string, examCategory: string) {
     return { battleId: battle.id, status: 'matched' as const };
   }
 
-  // No opponent found — add self to queue and wait
+  // No opponent found — add self to queue and wait.
+  // Use NX so the TTL is only set when the key is first created, not reset on every poll.
   if (opponentId === userId) {
-    // We accidentally popped ourselves — put back
     await redis.rpush(queueKey, userId);
   } else {
     await redis.rpush(queueKey, userId);
   }
-  await redis.expire(queueKey, 60);
+  await redis.expire(queueKey, 60, 'NX');
   return { battleId: null, status: 'waiting' as const };
 }
 
@@ -242,7 +248,10 @@ export async function getBattle(battleId: string, userId: string) {
 // ── Forfeit ───────────────────────────────────────────────────────────────────
 
 export async function forfeit(battleId: string, userId: string): Promise<void> {
-  const battle = await prisma.battle.findUnique({ where: { id: battleId } });
+  const battle = await prisma.battle.findUnique({
+    where: { id: battleId },
+    select: { player1Id: true, player2Id: true, status: true },
+  });
   if (!battle) throw new NotFoundError('Battle');
   if (battle.player1Id !== userId && battle.player2Id !== userId) {
     throw new ForbiddenError();
@@ -251,10 +260,13 @@ export async function forfeit(battleId: string, userId: string): Promise<void> {
 
   const winnerId = battle.player1Id === userId ? battle.player2Id : battle.player1Id;
 
-  await prisma.battle.update({
-    where: { id: battleId },
+  // Atomic update prevents double-forfeit race: two concurrent calls both see 'active',
+  // but only one updateMany wins; the loser gets count=0 and returns early.
+  const transitioned = await prisma.battle.updateMany({
+    where: { id: battleId, status: 'active' },
     data: { status: 'abandoned', winnerId, endedAt: new Date() },
   });
+  if (transitioned.count === 0) return;
 
   const ns = battleNsRef.get();
   if (ns) {
@@ -290,9 +302,15 @@ export async function resolveBattle(battleId: string): Promise<void> {
     },
   });
 
-  if (!battle || battle.status !== 'active') return; // idempotent guard
+  if (!battle || !battle.player2Id) return;
   const { player1Id, player2Id } = battle;
-  if (!player2Id) return;
+
+  // Atomic status transition: only one concurrent resolver wins.
+  const transitioned = await prisma.battle.updateMany({
+    where: { id: battleId, status: 'active' },
+    data: { status: 'completed' },
+  });
+  if (transitioned.count === 0) return; // already resolved by a concurrent call
 
   const [p1Raw, p2Raw] = await Promise.all([
     redis.get(KEYS.battleAnswers(battleId, player1Id)),
@@ -319,7 +337,7 @@ export async function resolveBattle(battleId: string): Promise<void> {
 
   await prisma.battle.update({
     where: { id: battleId },
-    data: { status: 'completed', winnerId, endedAt: new Date() },
+    data: { winnerId, endedAt: new Date() },
   });
 
   // Flush answers to permanent table

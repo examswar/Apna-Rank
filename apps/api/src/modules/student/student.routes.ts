@@ -108,13 +108,15 @@ export default async function studentRoutes(app: FastifyInstance) {
     return reply.status(200).send(ok(result));
   });
 
-  // GET /api/v1/student/progress
-  app.get('/progress', auth, async (_request, reply) => {
-    return reply.status(200).send(ok({ days: [] }));
+  // GET /api/v1/student/progress — 30-day daily activity calendar
+  app.get('/progress', auth, async (request, reply) => {
+    const result = await StudentService.getProgress(request.user.id);
+    return reply.status(200).send(ok(result));
   });
 
-  // GET /api/v1/student/readiness
-  app.get('/readiness', auth, async (_request, reply) => {
-    return reply.status(200).send(ok({ readyTopics: [], remainingTopics: [], readinessPct: 0 }));
+  // GET /api/v1/student/readiness — topic readiness percentage
+  app.get('/readiness', auth, async (request, reply) => {
+    const result = await StudentService.getReadiness(request.user.id);
+    return reply.status(200).send(ok(result));
   });
 }

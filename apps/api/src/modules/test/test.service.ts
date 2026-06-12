@@ -207,12 +207,16 @@ export async function addQuestionToTest(
   if (test.isPublished) throw new ValidationError('Cannot add questions to a published test');
   if (!question) throw new NotFoundError('Question');
 
-  // Check same exam category
   if (test.examCategory !== question.examCategory) {
     throw new ValidationError('Question exam category does not match test');
   }
 
-  // Auto-assign next orderIndex
+  const duplicate = await prisma.testQuestion.findUnique({
+    where: { testId_questionId: { testId, questionId } },
+    select: { id: true },
+  });
+  if (duplicate) throw new ConflictError('Question is already in this test');
+
   const agg = await prisma.testQuestion.aggregate({
     where: { testId },
     _max: { orderIndex: true },
@@ -274,6 +278,14 @@ export async function startAttempt(testId: string, studentId: string) {
   });
   if (inProgress) return inProgress;
 
+  // Marketplace tests require purchase — same guard as attempt.service.ts
+  if (test.type === 'marketplace' && Number(test.price) > 0) {
+    const purchased = await prisma.testPurchase.findUnique({
+      where: { testId_studentId: { testId, studentId } },
+    });
+    if (!purchased) throw new ForbiddenError('Test kharidna zaroori hai pehle');
+  }
+
   const isMinor = await prisma.user
     .findUnique({ where: { id: studentId }, select: { isMinor: true } })
     .then((u) => u?.isMinor ?? false);
@@ -319,15 +331,17 @@ export async function submitAttempt(
   });
 
   const correctMap = new Map(questions.map((q) => [q.questionId, q.question.correctOption]));
+  const marksMap   = new Map(questions.map((q) => [q.questionId, Number(q.marks)]));
 
   let score = 0;
   const answerRows = data.answers.map((a) => {
     const correctOption = correctMap.get(a.questionId);
+    const qMarks        = marksMap.get(a.questionId) ?? 1.0;
     const isCorrect = a.selectedOption !== null && a.selectedOption === correctOption;
-    const isWrong = a.selectedOption !== null && a.selectedOption !== correctOption;
+    const isWrong   = a.selectedOption !== null && a.selectedOption !== correctOption;
 
-    if (isCorrect) score += 1;
-    if (isWrong) score -= Number(attempt.test.negativeMarking);
+    if (isCorrect) score += qMarks;
+    if (isWrong)   score -= qMarks * Number(attempt.test.negativeMarking);
 
     return {
       attemptId,

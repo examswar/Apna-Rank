@@ -60,23 +60,19 @@ export async function signDpa(
   if (!institute) throw new NotFoundError('Institute');
   if (institute.dpaSigned) throw new ConflictError('DPA already signed');
 
+  const now = new Date();
+
   await prisma.$transaction([
     prisma.dpaRecord.create({
-      data: {
-        instituteId: institute.id,
-        version:     '1.0',
-        signedAt:    new Date(),
-        signedBy,
-        ipAddress,
-      },
+      data: { instituteId: institute.id, version: '1.0', signedAt: now, signedBy, ipAddress },
     }),
     prisma.institute.update({
       where: { id: institute.id },
-      data:  { dpaSigned: true, dpaSignedAt: new Date() },
+      data:  { dpaSigned: true, dpaSignedAt: now },
     }),
   ]);
 
-  return { signed: true, version: '1.0', signedAt: new Date().toISOString() };
+  return { signed: true, version: '1.0', signedAt: now.toISOString() };
 }
 
 // ── Batches ───────────────────────────────────────────────────────────────────
@@ -104,9 +100,14 @@ export async function createBatch(
 ) {
   const institute = await prisma.institute.findUnique({
     where: { contactUserId: userId },
-    select: { id: true },
+    select: { id: true, hasMinorStudents: true, dpaSigned: true },
   });
   if (!institute) throw new NotFoundError('Institute');
+
+  // DPDP: institutes that handle minors must sign the DPA before creating batches.
+  if (institute.hasMinorStudents && !institute.dpaSigned) {
+    throw new DpaRequiredError();
+  }
 
   return prisma.batch.create({
     data: {

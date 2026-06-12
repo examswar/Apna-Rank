@@ -95,6 +95,32 @@ export async function getMistakeDna(userId: string) {
   }));
 }
 
+export async function getLeaderboard(userId: string) {
+  const myLatest = await prisma.diagnosisResult.findFirst({
+    where: { studentId: userId, isMinorData: false },
+    orderBy: { createdAt: 'desc' },
+    select: { readinessPct: true },
+  });
+
+  if (!myLatest?.readinessPct) {
+    return { rank: null, percentile: null, total: 0 };
+  }
+
+  const myScore = Number(myLatest.readinessPct);
+
+  const [total, below] = await Promise.all([
+    prisma.diagnosisResult.count({ where: { isMinorData: false } }),
+    prisma.diagnosisResult.count({
+      where: { isMinorData: false, readinessPct: { lt: myScore } },
+    }),
+  ]);
+
+  const percentile = total > 0 ? Math.round((below / total) * 100) : null;
+  const rank = total > 0 ? total - below : null;
+
+  return { rank, percentile, total };
+}
+
 export async function getAajKaKaam(userId: string) {
   const latest = await prisma.diagnosisResult.findFirst({
     where: { studentId: userId },

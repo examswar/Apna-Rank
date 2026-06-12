@@ -25,16 +25,20 @@ const dobBody = z.object({
 });
 
 const consentBody = z.object({
-  minorUserId: z.string().uuid(),
   guardianPhone: z.string().regex(/^[6-9]\d{9}$/, 'Invalid Indian mobile number'),
 });
+
+// Refresh cookie is scoped to the whole auth prefix so BOTH /refresh and
+// /logout receive it. Scoping it to only /refresh meant the cookie was never
+// sent to /logout, so server-side refresh-token revocation never ran.
+const REFRESH_COOKIE_PATH = '/api/v1/auth';
 
 export default async function authRoutes(app: FastifyInstance) {
   // POST /api/v1/auth/otp/send
   // Rate limited to 3 per phone per 15 minutes (enforced in service)
   app.post('/otp/send', async (request, reply) => {
     const body = sendOtpBody.parse(request.body);
-    await AuthService.sendOtp(body.phone);
+    await AuthService.sendOtp(body.phone, request.ip);
     return reply.status(200).send(ok({ message: 'OTP sent' }));
   });
 
@@ -47,7 +51,7 @@ export default async function authRoutes(app: FastifyInstance) {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
-      path: '/api/v1/auth/refresh',
+      path: REFRESH_COOKIE_PATH,
       maxAge: 7 * 24 * 60 * 60,
     });
     return reply.status(200).send(ok({ accessToken: result.accessToken, user: result.user }));
@@ -62,7 +66,7 @@ export default async function authRoutes(app: FastifyInstance) {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
-      path: '/api/v1/auth/refresh',
+      path: REFRESH_COOKIE_PATH,
       maxAge: 7 * 24 * 60 * 60,
     });
     return reply.status(200).send(ok({ accessToken: result.accessToken }));
@@ -72,7 +76,7 @@ export default async function authRoutes(app: FastifyInstance) {
   app.post('/logout', { preHandler: authenticate }, async (request, reply) => {
     const refreshToken = request.cookies['refresh_token'];
     await AuthService.revokeRefreshToken(refreshToken);
-    reply.clearCookie('refresh_token', { path: '/api/v1/auth/refresh' });
+    reply.clearCookie('refresh_token', { path: REFRESH_COOKIE_PATH });
     return reply.status(200).send(ok({ message: 'Logged out' }));
   });
 
@@ -91,7 +95,7 @@ export default async function authRoutes(app: FastifyInstance) {
       httpOnly: true,
       secure: config.isProd,
       sameSite: 'strict',
-      path: '/api/v1/auth/refresh',
+      path: REFRESH_COOKIE_PATH,
       maxAge: 7 * 24 * 60 * 60,
     });
     return reply.status(200).send(ok({ accessToken: result.accessToken, user: result.user }));
@@ -106,17 +110,20 @@ export default async function authRoutes(app: FastifyInstance) {
       httpOnly: true,
       secure: config.isProd,
       sameSite: 'strict',
-      path: '/api/v1/auth/refresh',
+      path: REFRESH_COOKIE_PATH,
       maxAge: 7 * 24 * 60 * 60,
     });
     return reply.status(200).send(ok({ accessToken: result.accessToken, isMinor: result.isMinor }));
   });
 
   // POST /api/v1/auth/consent
-  // Guardian submits parental consent for a minor (DPDP Act 2023). No auth required.
-  app.post('/consent', async (request, reply) => {
+  // The signed-in minor submits their guardian's phone to start the DPDP consent
+  // flow. Requires auth and derives the minor from the token — previously this
+  // was unauthenticated and took an arbitrary minorUserId, so anyone could attach
+  // their own "guardian" phone to any minor's account.
+  app.post('/consent', { preHandler: authenticate }, async (request, reply) => {
     const body = consentBody.parse(request.body);
-    const result = await AuthService.submitParentalConsent(body.minorUserId, body.guardianPhone);
+    const result = await AuthService.submitParentalConsent(request.user.id, body.guardianPhone);
     return reply.status(201).send(ok(result));
   });
 }

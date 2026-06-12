@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { ok } from '../../lib/response';
+import { ok, paginated } from '../../lib/response';
 import { authenticate } from '../../middleware/authenticate';
 import * as AttemptService from './attempt.service';
 
@@ -22,6 +22,22 @@ const submitBody = z.object({
 
 export default async function attemptRoutes(app: FastifyInstance) {
   const auth = { preHandler: authenticate };
+
+  // GET /api/v1/attempts — list student's past attempts (paginated)
+  app.get('/', auth, async (request, reply) => {
+    const { page = '1', limit = '20' } = request.query as Record<string, string>;
+    const p = Math.max(1, parseInt(page, 10) || 1);
+    const l = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+    const result = await AttemptService.listAttempts(request.user.id, p, l);
+    return reply.status(200).send(paginated(result.attempts, result.total, p, l));
+  });
+
+  // GET /api/v1/attempts/:id — get single attempt detail
+  app.get('/:id', auth, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = await AttemptService.getAttemptDetail(id, request.user.id);
+    return reply.status(200).send(ok(result));
+  });
 
   // POST /api/v1/attempts/start — start a test attempt
   app.post('/start', auth, async (request, reply) => {

@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import { prisma } from '@apna-rank/db';
-import { redis } from '../lib/redis';
+import { redis, JOBS } from '../lib/redis';
 
 // ─── Rule-based Mistake DNA classifier ───────────────────────────────────────
 // Rules evaluated top-to-bottom; first match wins.
@@ -247,10 +247,37 @@ export async function runDiagnosis(attemptId: string, studentId: string): Promis
     }
   });
 
-  // Update last active timestamp
+  // Update last active timestamp and recalculate streak
+  const profile = await prisma.studentProfile.findUnique({
+    where: { userId: studentId },
+    select: { lastActiveAt: true, currentStreak: true, maxStreak: true },
+  });
+
+  const now = new Date();
+  let newStreak = 1;
+
+  if (profile?.lastActiveAt) {
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const prevDay = new Date(
+      profile.lastActiveAt.getFullYear(),
+      profile.lastActiveAt.getMonth(),
+      profile.lastActiveAt.getDate(),
+    ).getTime();
+    const diffDays = Math.round((today - prevDay) / 86_400_000);
+
+    if (diffDays === 0) {
+      newStreak = profile.currentStreak;     // already active today, keep streak
+    } else if (diffDays === 1) {
+      newStreak = profile.currentStreak + 1; // active yesterday, extend streak
+    }
+    // diffDays > 1: streak broken, reset to 1
+  }
+
+  const newMaxStreak = Math.max(newStreak, profile?.maxStreak ?? 0);
+
   await prisma.studentProfile.updateMany({
     where: { userId: studentId },
-    data: { lastActiveAt: new Date() },
+    data: { lastActiveAt: now, currentStreak: newStreak, maxStreak: newMaxStreak },
   });
 
   console.log(
@@ -265,6 +292,14 @@ export function startDiagnosisWorker(): Worker {
   const worker = new Worker(
     'diagnosis',
     async (job: Job) => {
+      if (job.name === JOBS.COMPUTE_BATTLE_DIAGNOSIS) {
+        // Battle answers are stored directly in battle_answers, not in attempts.
+        // Log for now; full per-player post-battle diagnosis can be added when
+        // the battle attempt linking is implemented.
+        const { battleId, playerId } = job.data as { battleId: string; playerId: string };
+        console.log(`[diagnosis] Battle diagnosis job: battleId=${battleId} playerId=${playerId} — skipped (not yet implemented)`);
+        return;
+      }
       const { attemptId, studentId } = job.data as { attemptId: string; studentId: string };
       await runDiagnosis(attemptId, studentId);
     },
