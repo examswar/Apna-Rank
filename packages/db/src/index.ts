@@ -41,11 +41,20 @@ export function encryptField(plaintext: string): string {
 }
 
 export function decryptField(ciphertext: string): string {
+  if (!ciphertext || typeof ciphertext !== 'string') {
+    throw new Error('decryptField: ciphertext is empty or not a string');
+  }
+  const parts = ciphertext.split(':');
+  if (parts.length !== 3) {
+    throw new Error('decryptField: malformed ciphertext — expected iv:authTag:encrypted');
+  }
   const KEY = getEncryptionKey();
-  const [ivHex, authTagHex, encryptedHex] = ciphertext.split(':');
+  const [ivHex, authTagHex, encryptedHex] = parts;
   const iv = Buffer.from(ivHex, 'hex');
   const authTag = Buffer.from(authTagHex, 'hex');
   const encrypted = Buffer.from(encryptedHex, 'hex');
+  if (iv.length !== 12) throw new Error('decryptField: invalid IV length');
+  if (authTag.length !== 16) throw new Error('decryptField: invalid authTag length');
   const decipher = createDecipheriv('aes-256-gcm', KEY, iv);
   decipher.setAuthTag(authTag);
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
