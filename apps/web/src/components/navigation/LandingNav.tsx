@@ -39,12 +39,12 @@ export function LandingNav() {
         {/* Right Actions */}
         <div className="flex items-center gap-3">
           <Link href="/auth/phone" className="hidden sm:block">
-            <Button className="bg-[#4F46E5] text-white hover:bg-[#4338CA] rounded-full px-[36px] py-[24px] text-[15px] font-semibold transition-colors">
+            <Button className="bg-[#4F46E5] text-white hover:bg-[#4338CA] rounded-full px-[36px] py-[12px] h-auto text-[15px] font-semibold transition-colors">
               Login
             </Button>
           </Link>
           <Link href="/auth/phone">
-            <Button variant="secondary" className="bg-white border-[1.5px] border-[#4F46E5] text-[#4F46E5] hover:bg-indigo-50 hover:text-[#4F46E5] rounded-full px-[36px] py-[24px] text-[15px] font-semibold transition-colors">
+            <Button variant="secondary" className="bg-white border-[1.5px] border-[#4F46E5] text-[#4F46E5] hover:bg-indigo-50 hover:text-[#4F46E5] rounded-full px-[36px] py-[12px] h-auto text-[15px] font-semibold transition-colors">
               Sign Up
             </Button>
           </Link>

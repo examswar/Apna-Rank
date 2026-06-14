@@ -69,13 +69,13 @@ export default function LandingPage() {
       <LandingNav />
 
       {/* HERO SECTION */}
-      <section className="p-4 md:p-6 w-full max-w-[1400px] mx-auto mt-2">
+      <section className="p-6 w-full max-w-[1400px] mx-auto mt-2">
         <div 
           className="relative w-full rounded-[24px] overflow-hidden min-h-[500px] md:min-h-[600px] flex items-center bg-cover bg-center"
           style={{ backgroundImage: `url('https://images.unsplash.com/photo-1522202176988-66273c2fd55f?q=80&w=2070&auto=format&fit=crop')` }}
         >
           {/* Gradient Overlay */}
-          <div className="absolute inset-0 z-0 pointer-events-none bg-gradient-to-r from-[rgba(243,232,255,0.95)] via-[rgba(243,232,255,0.85)] to-[rgba(243,232,255,0.35)] md:from-[rgba(243,232,255,0.92)] md:via-[rgba(243,232,255,0.7)] md:to-[rgba(243,232,255,0.35)]"></div>
+          <div className="absolute inset-0 z-0 pointer-events-none bg-gradient-to-r from-[rgba(243,232,255,0.98)] via-[rgba(243,232,255,0.9)] to-[rgba(243,232,255,0.5)] md:from-[rgba(243,232,255,0.92)] md:via-transparent md:to-[rgba(243,232,255,0.35)]"></div>
           
           <div className="relative z-10 w-full px-6 md:px-16 py-16">
             <motion.div 
@@ -114,19 +114,19 @@ export default function LandingPage() {
       <section className="px-4 md:px-6 w-full max-w-[1400px] mx-auto md:-mt-14 -mt-10 relative z-20 mb-16">
         <div className="bg-white border border-[#E2E8F0] shadow-sm rounded-[16px] p-4 md:p-6 max-w-4xl mx-auto flex flex-row items-center justify-between divide-x divide-[#E2E8F0]">
           <div className="flex-1 flex flex-col items-center text-center px-2 md:px-4">
-            <Users className="w-5 h-5 text-[#4F46E5] mb-1.5 md:mb-2" />
-            <div className="text-[20px] md:text-[24px] font-bold text-[#0F172A] leading-tight">28L+</div>
-            <div className="text-[12px] md:text-[13px] text-[#64748B] font-medium">Aspirants</div>
+            <Users className="w-5 h-5 text-[#4F46E5] mb-2" />
+            <div className="text-[24px] font-bold text-[#0F172A] leading-tight">28L+</div>
+            <div className="text-[13px] text-[#64748B] font-medium">Aspirants</div>
           </div>
           <div className="flex-1 flex flex-col items-center text-center px-2 md:px-4">
-            <BookOpen className="w-5 h-5 text-[#4F46E5] mb-1.5 md:mb-2" />
-            <div className="text-[20px] md:text-[24px] font-bold text-[#0F172A] leading-tight">500+</div>
-            <div className="text-[12px] md:text-[13px] text-[#64748B] font-medium">Tests</div>
+            <BookOpen className="w-5 h-5 text-[#4F46E5] mb-2" />
+            <div className="text-[24px] font-bold text-[#0F172A] leading-tight">500+</div>
+            <div className="text-[13px] text-[#64748B] font-medium">Tests</div>
           </div>
           <div className="flex-1 flex flex-col items-center text-center px-2 md:px-4">
-            <Globe className="w-5 h-5 text-[#4F46E5] mb-1.5 md:mb-2" />
-            <div className="text-[20px] md:text-[24px] font-bold text-[#0F172A] leading-tight">Hindi</div>
-            <div className="text-[12px] md:text-[13px] text-[#64748B] font-medium">First</div>
+            <Globe className="w-5 h-5 text-[#4F46E5] mb-2" />
+            <div className="text-[24px] font-bold text-[#0F172A] leading-tight">Hindi</div>
+            <div className="text-[13px] text-[#64748B] font-medium">First</div>
           </div>
         </div>
       </section>
